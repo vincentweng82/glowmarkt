@@ -1,6 +1,6 @@
 ### Manual installation
 
-Copy the `custom_components/hildebrandglow_dcc/` directory and all of its files to your `config/custom_components/` directory.
+Copy the `custom_components/glowmarkt/` directory and all of its files to your `config/custom_components/` directory.
 
 ## Configuration
 
