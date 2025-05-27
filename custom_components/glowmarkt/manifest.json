@@ -8,5 +8,5 @@
   "requirements": ["requests>=2.25.1"],
   "codeowners": ["vincent"],
   "icon": "logo.ico",
-  "logo": "https://forum.glowmarkt.com/uploads/f0828c96479d43baf85211c4088b6e4e.png"
+  "logo": "logo.png"
 }
