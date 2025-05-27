@@ -1,5 +1,5 @@
 """Sensor platform for Glowmarkt integration."""
-from datetime import datetime
+from datetime import datetime, timezone
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.const import (
     UnitOfEnergy,
@@ -61,6 +61,9 @@ class GlowmarktSensor(CoordinatorEntity, SensorEntity):
         """Return a unique ID to use for this entity."""
         return f"{self._entry.entry_id}_{self._attr_name.lower().replace(' ', '_')}"
 
+
+from datetime import datetime, timezone, timedelta
+
 class GlowmarktPeriodUsageSensor(GlowmarktSensor):
     """Representation of Glowmarkt 30-minute period usage sensor."""
     
@@ -76,7 +79,9 @@ class GlowmarktPeriodUsageSensor(GlowmarktSensor):
     
     @property
     def native_value(self):
-        """Return the last non-zero 30-minute usage value."""
+        """返回时间最接近当前时刻的非零值"""
+        now = datetime.now(timezone.utc).timestamp()  # 获取当前UTC时间戳
+        
         if self.coordinator.data is None:
             return self._last_non_zero_value or 0
         
@@ -84,24 +89,44 @@ class GlowmarktPeriodUsageSensor(GlowmarktSensor):
         if not readings:
             return self._last_non_zero_value or 0
         
-        # 查找最后一个非零值
-        for timestamp, value in reversed(readings):
-            if value != 0:
-                self._last_non_zero_value = value
-                self._last_timestamp = timestamp
-                return value
+        closest_value = None
+        closest_diff = None
+        closest_timestamp = None
         
-        # 如果没有找到非零值，返回之前存储的值
+        # 遍历所有读数寻找最接近的非零值
+        for timestamp, value in readings:
+            if value == 0:
+                continue
+                
+            # 计算时间差绝对值
+            time_diff = abs(timestamp - now)
+            
+            # 更新最接近的值
+            if closest_diff is None or time_diff < closest_diff:
+                closest_diff = time_diff
+                closest_value = value
+                closest_timestamp = timestamp
+        
+        # 更新最后记录值
+        if closest_value is not None:
+            self._last_non_zero_value = closest_value
+            self._last_timestamp = closest_timestamp
+            return closest_value
+        
         return self._last_non_zero_value or 0
     
     @property
     def extra_state_attributes(self):
-        """Return the state attributes."""
-        attrs = {
-            "timestamp": self._last_timestamp,
-            "units": self.coordinator.data.get("units", "kWh") if self.coordinator.data else "kWh",
+        """返回包含UTC时间的格式化属性，格式如 21:00 (UTC)"""
+        readable_time = None
+        if self._last_timestamp is not None:
+            utc_time = datetime.fromtimestamp(self._last_timestamp, tz=timezone.utc)
+            readable_time = utc_time.strftime("%H:%M") + " (UTC)"
+        
+        return {
+            "latest_reading_time": readable_time,
+            "units": self.coordinator.data.get("units", "kWh") if self.coordinator.data else "kWh"
         }
-        return attrs
     
 class GlowmarktCumulativeUsageSensor(GlowmarktSensor):
     """Representation of Glowmarkt cumulative usage sensor."""
@@ -134,12 +159,22 @@ class GlowmarktCumulativeUsageSensor(GlowmarktSensor):
 
     @property
     def extra_state_attributes(self):
-        """Return the state attributes."""
+        """Return the state attributes with readable timestamp."""
         if self.coordinator.data is None:
             return None
 
+        raw_ts = self.coordinator.data.get("timestamp")
+        readable_time = None
+
+        if raw_ts is not None:
+            try:
+                dt = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+                readable_time = dt.strftime("%Y-%m-%d %H:%M (UTC)")
+            except (ValueError, TypeError):
+                readable_time = "Invalid timestamp"
+
         return {
-            ATTR_TIMESTAMP: self.coordinator.data.get("timestamp"),
+            ATTR_TIMESTAMP: readable_time,
             ATTR_UNITS: self.coordinator.data.get("units"),
         }
 
