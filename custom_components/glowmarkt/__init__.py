@@ -2,6 +2,7 @@
 import logging
 import requests
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -67,6 +68,50 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator):
 
         self.token = response.json()["token"]
 
+    def _get_catchup_data(self):
+        """Call the catchup endpoint to fetch historical data that may have been uploaded late."""
+        if not self.token:
+            self._authenticate()
+
+        headers = {
+            "applicationId": BRIGHT_APP_ID,
+            "Authorization": f"Bearer {self.token}"
+        }
+        url = f"{API_URL}/resource/{self.resource_id}/catchup"
+        try:
+            response = requests.get(url, headers=headers)
+            if response.status_code == 401:
+                _LOGGER.warning("Catchup token expired, re-authenticating")
+                self._authenticate()
+                headers["Authorization"] = f"Bearer {self.token}"
+                response = requests.get(url, headers=headers)
+
+            response.raise_for_status()
+            data = response.json()
+            _LOGGER.info(f"Catchup data retrieved: {len(data.get('data', []))} entries")
+            return data.get("data", [])
+        except Exception as err:
+            _LOGGER.error(f"Failed to fetch catchup data: {err}")
+            return []
+
+    def _merge_readings(self, original, catchup):
+        """Merge catchup readings into original readings, overriding zeros."""
+        merged = {}
+
+        for item in original:
+            if isinstance(item, list) and len(item) >= 2:
+                ts, value = item[0], item[1]
+                merged[ts] = value
+
+        for item in catchup:
+            if isinstance(item, list) and len(item) >= 2:
+                ts, value = item[0], item[1]
+                if ts not in merged or merged[ts] == 0:
+                    merged[ts] = value
+
+        # 返回按时间戳排序的合并结果（二维数组形式）
+        return sorted([[ts, merged[ts]] for ts in merged])
+
     def _get_usage_data(self):
         """Fetch usage data from the Glowmarkt API."""
         if not self.token:
@@ -76,22 +121,33 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator):
             "applicationId": BRIGHT_APP_ID,
             "Authorization": f"Bearer {self.token}"
         }
-        
-        # 设置时间范围
+        # 动态计算BST偏移
+        london_tz = ZoneInfo("Europe/London")
+        now_localized = datetime.now(london_tz)
+        utc_offset = now_localized.utcoffset()
+
+        # 判断是否为夏令时（BST）
+        offset_minutes = -60 if utc_offset.total_seconds() == 3600 else 0
+
+        # 计算时间范围
         now = datetime.now(timezone.utc)
         end = now
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # 今天0点35分（UTC）
+        boundary = now.replace(hour=0, minute=35, second=0, microsecond=0)
+
+        if now < boundary:
+            # 如果当前时间小于今天00:35，start就是前一天的00:29
+            start = (now - timedelta(days=1)).replace(hour=0, minute=29, second=0, microsecond=0)
+        else:
+            # 否则start是今天0点0分0秒
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
 
         from_str = start.strftime("%Y-%m-%dT%H:%M:%S")
         to_str = end.strftime("%Y-%m-%dT%H:%M:%S")
-        
-        # 修改：根据资源类型构建不同的URL
-        if "cost" in self.resource_name.lower():
-            # 成本资源使用不同的端点
-            url = f"{API_URL}/resource/{self.resource_id}/readings?from={from_str}&to={to_str}&period=PT30M&offset=0&function=sum"
-        else:
-            # 消费资源使用原来的端点
-            url = f"{API_URL}/resource/{self.resource_id}/readings?from={from_str}&to={to_str}&period=PT30M&offset=0&function=sum"
+
+        url = f"{API_URL}/resource/{self.resource_id}/readings?from={from_str}&to={to_str}&period=PT30M&offset={offset_minutes}&function=sum"
 
         response = requests.get(url, headers=headers)
         if response.status_code == 401:
@@ -102,35 +158,27 @@ class GlowmarktDataUpdateCoordinator(DataUpdateCoordinator):
 
         response.raise_for_status()
         api_data = response.json()
-        
-        # 修改：根据资源类型返回不同的数据结构
-        if "cost" in self.resource_name.lower():
-            readings = api_data.get("data", [])
-            if not readings or not isinstance(readings[0], list) or len(readings[0]) < 2:
-                raise UpdateFailed("API response has no usable cost readings")
 
-            return {
-                "readings": readings,
-                "timestamp": readings[-1][0] if readings else None,
-                "current_cost": readings[-1][1] if readings else 0,
-                "cumulative_cost": sum(r[1] for r in readings if isinstance(r, list) and len(r) > 1),
-                "resource_type": "cost",
-                "units": "GBP"
-            }
-        else:
-            readings = api_data.get("data", [])
-            units = api_data.get("units", self.resource_type)
-            
-            if not readings or not isinstance(readings[0], list) or len(readings[0]) < 2:
-                raise UpdateFailed("API response has no usable readings")
+        readings = api_data.get("data", [])
+        units = api_data.get("units", self.resource_type)
 
-            return {
-                "readings": readings,
-                "timestamp": readings[-1][0] if readings else None,
-                "units": units,
-                "cumulative": sum(r[1] for r in readings if isinstance(r, list) and len(r) > 1),
-                "resource_type": self.resource_type,
-            }
+        # 若 readings 中有 0，则调用 catchup 接口并合并
+        if any(isinstance(r, list) and len(r) > 1 and r[1] == 0 for r in readings):
+            _LOGGER.info("Detected zero in readings. Fetching catchup data...")
+            catchup_data = self._get_catchup_data()
+            readings = self._merge_readings(readings, catchup_data)
+
+        if not readings or not isinstance(readings[0], list) or len(readings[0]) < 2:
+            raise UpdateFailed("API response has no usable readings")
+
+        return {
+            "readings": readings,
+            "timestamp": readings[-1][0] if readings else None,
+            "units": units,
+            "cumulative": sum(r[1] for r in readings if isinstance(r, list) and len(r) > 1),
+            "resource_type": self.resource_type,
+        }
+
 
 
             
