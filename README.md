@@ -15,7 +15,7 @@ Then, add the integration:
 
 <details>
   <summary>Manually add the Integration</summary>
-  Visit the <i>Integrations</i> section in Home Assistant and click the <i>Add</i> button in the bottom right corner. Search for <code>Hildebrand Glow (DCC)</code> and input your credentials. <b>You may need to clear your browser cache before the integration appears in the list.</b>
+  Visit the <i>Integrations</i> section in Home Assistant and click the <i>Add</i> button in the bottom right corner. Search for <code>Glowmarkt</code> and input your credentials. <b>You may need to clear your browser cache before the integration appears in the list.</b>
 </details>
 
 ## Sensors
